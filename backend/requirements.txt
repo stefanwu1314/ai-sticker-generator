@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+httpx
+python-multipart
+minio
+sqlmodel
+sqlalchemy
+pydantic
+celery[redis]
+pillow
+python-dotenv
