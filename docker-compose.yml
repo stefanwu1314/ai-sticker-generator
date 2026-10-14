@@ -1,48 +1,12 @@
-version: '3.8'
-
-services:
-  redis:
-    image: redis:7
-    ports:
-      - '6379:6379'
-
-  minio:
-    image: minio/minio:RELEASE.2023-08-29T22-37-26Z
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    command: server /data
-    ports:
-      - '9000:9000'
-
-  api:
-    build: ./backend
-    restart: on-failure
-    environment:
-      - MINIO_ENDPOINT=minio:9000
-      - MINIO_ACCESS=minioadmin
-      - MINIO_SECRET=minioadmin
-      - MINIO_BUCKET=generated
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/1
-    depends_on:
-      - redis
-      - minio
-    ports:
-      - '8000:8000'
-
-  worker:
-    build: ./backend
-    command: celery -A app.celery_app worker --loglevel=info
-    environment:
-      - MINIO_ENDPOINT=minio:9000
-      - MINIO_ACCESS=minioadmin
-      - MINIO_SECRET=minioadmin
-      - MINIO_BUCKET=generated
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/1
-    depends_on:
-      - redis
-      - minio
-
-# frontend can be run locally (dev) via `npm install` + `npm run dev` in frontend/ directory
+MODEL_PROVIDER=volcano
+VOLCANO_API_URL=https://ark.cn-beijing.volces.com
+VOLCANO_API_KEY=replace_me
+VOLCANO_MODEL=doubao-seed-1-6
+MODEL_API_URL=https://ark.cn-beijing.volces.com
+MODEL_API_KEY=replace_me
+MINIO_ENDPOINT=minio:9000
+MINIO_ACCESS=minioadmin
+MINIO_SECRET=minioadmin
+MINIO_BUCKET=generated
+REDIS_URL=redis://redis:6379/0
+CELERY_BROKER_URL=redis://redis:6379/1

@@ -1,85 +1,61 @@
-<template>
-  <div class="upload-editor">
-    <div>
-      <label>Upload pet image:</label>
-      <input type="file" @change="onFileChange" accept="image/*" />
-    </div>
-    <div v-if="previewData" class="preview">
-      <img :src="previewData" alt="preview" style="max-width:300px;display:block;margin-bottom:12px;" />
-    </div>
-    <div>
-      <label>Top text</label>
-      <input v-model="topText" />
-    </div>
-    <div>
-      <label>Bottom text</label>
-      <input v-model="bottomText" />
-    </div>
-    <div style="margin-top:12px">
-      <button @click="uploadAndGenerate" :disabled="!file">Generate Sticker</button>
-    </div>
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+import uuid
+from .database import init_db, get_session
+from .db import Task
+from .storage import upload_bytes
+from .celery_tasks import generate_sticker
 
-    <div v-if="taskId" style="margin-top:16px">
-      <p>Task ID: {{ taskId }} — status: {{ taskStatus }}</p>
-      <div v-if="resultUrl">
-        <p>Result:</p>
-        <img :src="resultUrl" alt="result" style="max-width:320px;display:block;" />
-        <a :href="resultUrl" target="_blank">Open full</a>
-      </div>
-    </div>
-  </div>
-</template>
+app = FastAPI(title='AI Sticker Generator Gateway')
 
-<script setup>
-import { ref } from 'vue'
-import axios from 'axios'
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=['*'],
+    allow_credentials=True,
+    allow_methods=['*'],
+    allow_headers=['*'],
+)
 
-const file = ref(null)
-const previewData = ref(null)
-const topText = ref('')
-const bottomText = ref('')
-const taskId = ref(null)
-const taskStatus = ref(null)
-const resultUrl = ref(null)
+@app.on_event('startup')
+def on_startup():
+    init_db()
 
-function onFileChange(e) {
-  const f = e.target.files[0]
-  if (!f) return
-  file.value = f
-  const reader = new FileReader()
-  reader.onload = (ev) => previewData.value = ev.target.result
-  reader.readAsDataURL(f)
-}
+@app.post('/api/v1/upload')
+async def upload_image(file: UploadFile = File(...)):
+    contents = await file.read()
+    object_name = f"uploads/{uuid.uuid4().hex}-{file.filename}"
+    url = upload_bytes(contents, object_name)
+    return {'url': url}
 
-async function uploadAndGenerate() {
-  if (!file.value) return
-  const form = new FormData()
-  form.append('file', file.value)
-  const up = await axios.post('http://localhost:8000/api/v1/upload', form, { headers: { 'Content-Type': 'multipart/form-data' }})
-  const imageUrl = up.data.url
-  const create = await axios.post('http://localhost:8000/api/v1/tasks', { image_url: imageUrl, top_text: topText.value, bottom_text: bottomText.value })
-  taskId.value = create.data.task_id
-  pollStatus()
-}
+@app.post('/api/v1/tasks')
+async def create_task(payload: dict):
+    image_url = payload.get('image_url')
+    if not image_url:
+        raise HTTPException(status_code=400, detail='image_url required')
+    reference_image_url = payload.get('reference_image_url')
+    top_text = payload.get('top_text')
+    bottom_text = payload.get('bottom_text')
 
-async function pollStatus() {
-  if (!taskId.value) return
-  taskStatus.value = 'pending'
-  const interval = setInterval(async () => {
-    const res = await axios.get(`http://localhost:8000/api/v1/tasks/${taskId.value}`)
-    taskStatus.value = res.data.status
-    if (res.data.result_url) {
-      resultUrl.value = res.data.result_url
-    }
-    if (['success','failed'].includes(res.data.status)) {
-      clearInterval(interval)
-    }
-  }, 1500)
-}
-</script>
+    task_id = uuid.uuid4().hex
+    t = Task(
+        id=task_id,
+        status='pending',
+        input_image_url=image_url,
+        reference_image_url=reference_image_url,
+        top_text=top_text,
+        bottom_text=bottom_text,
+    )
+    with get_session() as s:
+        s.add(t)
+        s.commit()
 
-<style scoped>
-.upload-editor { border: 1px solid #eee; padding: 16px; border-radius: 8px }
-input { display:block; margin:6px 0 12px; padding:6px }
-button { padding:8px 12px }
-</style>
+    generate_sticker.delay(task_id, image_url, reference_image_url, top_text, bottom_text)
+    return {'task_id': task_id}
+
+@app.get('/api/v1/tasks/{task_id}')
+def get_task(task_id: str):
+    with get_session() as s:
+        t = s.get(Task, task_id)
+        if not t:
+            raise HTTPException(status_code=404, detail='task not found')
+        return {'task_id': t.id, 'status': t.status, 'result_url': t.result_url, 'error': t.error}

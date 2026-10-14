@@ -1,53 +1,44 @@
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-import uuid
+from celery import Celery
 import os
-from .database import init_db, get_session
+import requests
+from .database import get_session
 from .db import Task
 from .storage import upload_bytes
-from .celery_tasks import generate_sticker
+from .model_client import generate_sticker_from_image_bytes
 
-app = FastAPI(title='AI Sticker Generator Gateway')
+CELERY_BROKER = os.getenv('CELERY_BROKER_URL', 'redis://redis:6379/1')
+celery_app = Celery('worker', broker=CELERY_BROKER)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+@celery_app.task(name='tasks.generate_sticker')
+def generate_sticker(task_id: str, image_url: str, reference_image_url: str | None, top_text: str | None, bottom_text: str | None):
+    try:
+        r1 = requests.get(image_url, timeout=30)
+        r1.raise_for_status()
+        input_bytes = r1.content
 
-@app.on_event('startup')
-def on_startup():
-    init_db()
+        reference_bytes = None
+        if reference_image_url:
+            r2 = requests.get(reference_image_url, timeout=30)
+            r2.raise_for_status()
+            reference_bytes = r2.content
 
-@app.post('/api/v1/upload')
-async def upload_image(file: UploadFile = File(...)):
-    contents = await file.read()
-    object_name = f"uploads/{uuid.uuid4().hex}-{file.filename}"
-    url = upload_bytes(contents, object_name)
-    return {"url": url}
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        out_bytes = loop.run_until_complete(generate_sticker_from_image_bytes(input_bytes, top_text, bottom_text, reference_bytes))
+        object_name = f"{task_id}.png"
+        result_url = upload_bytes(out_bytes, object_name)
 
-@app.post('/api/v1/tasks')
-async def create_task(payload: dict):
-    # payload expected: image_url, top_text, bottom_text
-    image_url = payload.get('image_url')
-    if not image_url:
-        raise HTTPException(status_code=400, detail='image_url required')
-    top_text = payload.get('top_text')
-    bottom_text = payload.get('bottom_text')
-    task_id = uuid.uuid4().hex
-    t = Task(id=task_id, status='pending', input_image_url=image_url, top_text=top_text, bottom_text=bottom_text)
-    with get_session() as s:
-        s.add(t); s.commit()
-    # dispatch celery task
-    generate_sticker.delay(task_id, image_url, top_text, bottom_text)
-    return {"task_id": task_id}
-
-@app.get('/api/v1/tasks/{task_id}')
-def get_task(task_id: str):
-    with get_session() as s:
-        t = s.get(Task, task_id)
-        if not t:
-            raise HTTPException(status_code=404, detail='task not found')
-        return {"task_id": t.id, "status": t.status, "result_url": t.result_url, "error": t.error}
+        with get_session() as s:
+            t = s.get(Task, task_id)
+            t.status = 'success'
+            t.result_url = result_url
+            s.add(t)
+            s.commit()
+    except Exception as e:
+        with get_session() as s:
+            t = s.get(Task, task_id)
+            t.status = 'failed'
+            t.error = str(e)
+            s.add(t)
+            s.commit()
