@@ -1,186 +1,89 @@
-<template>
-  <div class="upload-editor">
-    <div class="field-group">
-      <label>Upload your pet image</label>
-      <input type="file" @change="onPetFileChange" accept="image/*" />
-    </div>
+# ai-sticker-generator
 
-    <div class="field-group">
-      <label>Upload reference meme / style image (optional)</label>
-      <input type="file" @change="onReferenceFileChange" accept="image/*" />
-    </div>
+Starter repo for a pet meme / sticker generator. Users upload pet photos and turn them into sticker-style animal meme images using a remote AI provider (Volcengine Ark / ByteDance, with a local mock fallback).
 
-    <div v-if="previewData" class="preview">
-      <img :src="previewData" alt="pet preview" />
-    </div>
-    <div v-if="referencePreviewData" class="preview reference-preview">
-      <img :src="referencePreviewData" alt="reference preview" />
-    </div>
+## Stack
+- Vue 3 frontend
+- FastAPI backend
+- Celery + Redis worker
+- MinIO object storage
+- Docker Compose starter
 
-    <div class="field-group">
-      <label>Style template</label>
-      <select v-model="styleTemplate">
-        <option value="cute">Cute animal meme</option>
-        <option value="shocked">Shocked animal meme</option>
-        <option value="happy">Happy animal meme</option>
-      </select>
-    </div>
+## Local dev (demo / mock)
 
-    <div class="field-group">
-      <label>Top text</label>
-      <input v-model="topText" placeholder="e.g. WHEN I SEE FOOD" />
-    </div>
-    <div class="field-group">
-      <label>Bottom text</label>
-      <input v-model="bottomText" placeholder="e.g. ME: *runs in circles*" />
-    </div>
+1. Copy `.env.example` to `.env` and adjust values (set `MODEL_PROVIDER=mock` to run without any AI provider key):
 
-    <div class="actions">
-      <button @click="uploadAndGenerate" :disabled="!petFile">Generate Sticker</button>
-    </div>
+```bash
+cp .env.example .env
+```
 
-    <div v-if="taskId" class="task-box">
-      <p>Task ID: {{ taskId }} — status: {{ taskStatus }}</p>
-      <div v-if="resultUrl">
-        <p>Result:</p>
-        <img :src="resultUrl" alt="result" class="result-img" />
-        <a :href="resultUrl" target="_blank">Open full result</a>
-      </div>
-    </div>
-  </div>
-</template>
+2. Start infra + backend
 
-<script setup>
-import { ref } from 'vue'
-import axios from 'axios'
+```bash
+docker-compose up --build
+```
 
-const petFile = ref(null)
-const referenceFile = ref(null)
-const previewData = ref(null)
-const referencePreviewData = ref(null)
-const topText = ref('')
-const bottomText = ref('')
-const styleTemplate = ref('cute')
-const taskId = ref(null)
-const taskStatus = ref(null)
-const resultUrl = ref(null)
+This starts Redis, MinIO (http://localhost:9000, console at http://localhost:9001), the FastAPI API (http://localhost:8000) and the Celery worker.
 
-function onPetFileChange(e) {
-  const f = e.target.files[0]
-  if (!f) return
-  petFile.value = f
-  const reader = new FileReader()
-  reader.onload = (ev) => previewData.value = ev.target.result
-  reader.readAsDataURL(f)
-}
+3. Run frontend
 
-function onReferenceFileChange(e) {
-  const f = e.target.files[0]
-  if (!f) return
-  referenceFile.value = f
-  const reader = new FileReader()
-  reader.onload = (ev) => referencePreviewData.value = ev.target.result
-  reader.readAsDataURL(f)
-}
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
-async function uploadAndGenerate() {
-  if (!petFile.value) return
+Open http://localhost:5173, upload a pet photo, optionally a reference meme image, add texts and click Generate Sticker.
 
-  const petForm = new FormData()
-  petForm.append('file', petFile.value)
-  const petUploadRes = await axios.post('http://localhost:8000/api/v1/upload', petForm, {
-    headers: { 'Content-Type': 'multipart/form-data' }
-  })
+## Real AI provider config (Volcengine Ark / ByteDance)
 
-  let refImageUrl = null
-  if (referenceFile.value) {
-    const refForm = new FormData()
-    refForm.append('file', referenceFile.value)
-    const refUploadRes = await axios.post('http://localhost:8000/api/v1/upload', refForm, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    })
-    refImageUrl = refUploadRes.data.url
-  }
+In `.env`:
 
-  const payload = {
-    image_url: petUploadRes.data.url,
-    reference_image_url: refImageUrl,
-    top_text: `${styleTemplate.value === 'shocked' ? 'NO WAY' : styleTemplate.value === 'happy' ? 'BEST DAY EVER' : 'SO CUTE'}`,
-    bottom_text: bottomText.value || (styleTemplate.value === 'shocked' ? 'THE PET DID THIS AGAIN' : styleTemplate.value === 'happy' ? 'THEY ARE THE BEST' : 'ME WHEN I SEE THEM')
-  }
-  if (topText.value) payload.top_text = topText.value
+```bash
+MODEL_PROVIDER=volcano
+VOLCANO_API_URL=https://ark.cn-beijing.volces.com
+VOLCANO_API_KEY=your_key_here
+VOLCANO_MODEL=doubao-seedream-4-0-250828
+```
 
-  const create = await axios.post('http://localhost:8000/api/v1/tasks', payload)
-  taskId.value = create.data.task_id
-  pollStatus()
-}
+Notes:
+- `VOLCANO_MODEL` must be a valid image-generation model ID (`doubao-seedream-*`) or your Ark endpoint ID (`ep-xxx`). Do not use chat model IDs such as `doubao-seed-1-6`.
+- Keep your API key in `.env` or secrets only — never commit it. If a key was ever leaked, rotate it in the Ark console.
+- When the Ark call fails, the worker falls back to the local mock generator so the task flow still completes.
 
-async function pollStatus() {
-  if (!taskId.value) return
-  taskStatus.value = 'pending'
-  const interval = setInterval(async () => {
-    const res = await axios.get(`http://localhost:8000/api/v1/tasks/${taskId.value}`)
-    taskStatus.value = res.data.status
-    if (res.data.result_url) {
-      resultUrl.value = res.data.result_url
-    }
-    if (['success', 'failed'].includes(res.data.status)) {
-      clearInterval(interval)
-    }
-  }, 1500)
-}
-</script>
+## How it works
 
-<style scoped>
-.upload-editor {
-  border: 1px solid #eee;
-  border-radius: 12px;
-  padding: 20px;
-  background: #fff;
-}
-.field-group {
-  margin-bottom: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.preview {
-  margin: 10px 0;
-}
-.preview img {
-  max-width: 280px;
-  max-height: 280px;
-  border-radius: 10px;
-}
-.reference-preview {
-  border: 1px dashed #ddd;
-  padding: 8px;
-  display: inline-block;
-}
-.actions {
-  margin-top: 12px;
-}
-button {
-  background: #0a84ff;
-  color: white;
-  border: none;
-  border-radius: 8px;
-  padding: 10px 14px;
-  cursor: pointer;
-}
-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.task-box {
-  margin-top: 18px;
-  border-top: 1px solid #eee;
-  padding-top: 12px;
-}
-.result-img {
-  max-width: 320px;
-  border-radius: 10px;
-  display: block;
-  margin: 8px 0;
-}
-</style>
+1. Frontend uploads the pet photo (and optional reference meme) via `POST /api/v1/upload`; the API stores the object in MinIO and returns two presigned URLs — an external one for the browser and an internal one for the worker.
+2. Frontend creates a task via `POST /api/v1/tasks` (passing the internal URLs); the API persists it in the shared SQLite database (`/app/data/data.db`) and dispatches a Celery job.
+3. The worker downloads the images, calls the provider (Ark image generation with `data:image/png;base64,...` input images, or the Pillow mock), uploads the result to MinIO and stores an external presigned result URL.
+4. Frontend polls `GET /api/v1/tasks/{task_id}` until status is `success` or `failed`, then shows/downloads the result.
+
+## Project structure
+
+```
+backend/
+  app/
+    main.py           # FastAPI entry (upload / tasks endpoints)
+    celery_tasks.py   # Celery worker task
+    model_client.py   # provider abstraction (volcano + mock)
+    storage.py        # MinIO helpers (internal + external presigned URLs)
+    database.py       # SQLModel engine (DATABASE_URL)
+    db.py             # Task model
+  Dockerfile
+  requirements.txt
+frontend/
+  src/
+    components/UploadEditor.vue
+    App.vue
+    main.js
+    style.css
+deploy/
+  README.md
+docker-compose.yml
+.env.example
+```
+
+## Important notes
+- The SQLite database lives on the shared `app-data` docker volume, so the API and the worker see the same data. For production, switch `DATABASE_URL` to Postgres/MySQL.
+- Add content safety checks before publishing user-generated images.
+- Ensure provider keys are kept in environment variables or secrets, not committed to source control.
